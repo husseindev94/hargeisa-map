@@ -3,14 +3,14 @@
 
 const HargeisaMap = (function () {
     // Hargeisa center coordinates
-    const CENTER = [9.56, 44.064];
-    const DEFAULT_ZOOM = 14;
-    const MIN_ZOOM = 12;
+    const CENTER = [9.5600, 44.064];
+    const DEFAULT_ZOOM = 15;
+    const MIN_ZOOM = 13;
 
-    // Bounds to restrict map to Hargeisa area
+    // Bounds to restrict map to central Hargeisa
     const HARGEISA_BOUNDS = L.latLngBounds(
-        [9.46, 43.94],  // Southwest corner
-        [9.66, 44.18]   // Northeast corner
+        [9.52, 44.02],  // Southwest corner
+        [9.60, 44.11]   // Northeast corner
     );
 
     let map;
@@ -35,6 +35,11 @@ const HargeisaMap = (function () {
 
         // Zoom control - bottom right
         L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+        // Home button - recenter map
+        document.getElementById('home-btn').addEventListener('click', function () {
+            map.flyTo(CENTER, DEFAULT_ZOOM, { duration: 1 });
+        });
 
         // Show coordinates on mouse move
         const coordDisplay = document.getElementById('coord-display');
@@ -80,6 +85,14 @@ const HargeisaMap = (function () {
 
         // Load streets
         HargeisaStreets.load(map);
+
+        // Initialize places search
+        HargeisaPlaces.init(map);
+
+        // Preload places data in background after streets load
+        setTimeout(function () {
+            HargeisaPlaces.preloadAll(map);
+        }, 5000);
 
         return map;
     }

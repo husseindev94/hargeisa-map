@@ -55,21 +55,21 @@ const HargeisaSearch = (function () {
         var queryLower = query.toLowerCase();
 
         // Filter named streets matching query
-        var matches = streets.filter(function (street) {
+        var streetMatches = streets.filter(function (street) {
             if (!street.name) return false;
             return street.name.toLowerCase().indexOf(queryLower) !== -1;
         });
 
         // Remove duplicates by name
         var seen = {};
-        matches = matches.filter(function (street) {
+        streetMatches = streetMatches.filter(function (street) {
             if (seen[street.name]) return false;
             seen[street.name] = true;
             return true;
         });
 
         // Sort: exact prefix matches first, then alphabetical
-        matches.sort(function (a, b) {
+        streetMatches.sort(function (a, b) {
             var aStarts = a.name.toLowerCase().indexOf(queryLower) === 0;
             var bStarts = b.name.toLowerCase().indexOf(queryLower) === 0;
             if (aStarts && !bStarts) return -1;
@@ -77,21 +77,49 @@ const HargeisaSearch = (function () {
             return a.name.localeCompare(b.name);
         });
 
-        // Limit results
-        matches = matches.slice(0, 15);
+        // Search places too
+        var placeMatches = HargeisaPlaces.searchPlaces(query);
 
-        renderResults(matches);
+        // Limit results
+        streetMatches = streetMatches.slice(0, 10);
+        placeMatches = placeMatches.slice(0, 5);
+
+        renderResults(streetMatches, placeMatches);
     }
 
-    function renderResults(matches) {
-        if (matches.length === 0) {
-            searchResults.innerHTML = '<li style="color:#9aa0a6;cursor:default;">No streets found</li>';
+    function renderResults(streetMatches, placeMatches) {
+        placeMatches = placeMatches || [];
+
+        if (streetMatches.length === 0 && placeMatches.length === 0) {
+            searchResults.innerHTML = '<li style="color:#9aa0a6;cursor:default;">No results found</li>';
             searchResults.classList.add('active');
             return;
         }
 
         var html = '';
-        matches.forEach(function (street) {
+        var categories = HargeisaPlaces.getCategories();
+        var categoryColors = {
+            hotels: '#8e24aa',
+            restaurants: '#e65100',
+            banks: '#1565c0',
+            malls: '#c62828'
+        };
+
+        // Render place matches first
+        placeMatches.forEach(function (place) {
+            var cat = categories[place.category] || {};
+            var color = categoryColors[place.category] || '#5f6368';
+            html += '<li data-place-id="' + place.id + '" data-lat="' + place.lat + '" data-lng="' + place.lng + '">';
+            html += '<span class="result-place-icon" style="background:' + color + ';color:#fff;">';
+            html += (cat.icon || '');
+            html += '</span>';
+            html += '<span>' + highlightMatch(place.name, searchInput.value.trim()) + '</span>';
+            html += '<span class="result-type">' + (cat.label || place.category) + '</span>';
+            html += '</li>';
+        });
+
+        // Render street matches
+        streetMatches.forEach(function (street) {
             var typeLabel = street.type.replace(/_/g, ' ');
             html += '<li data-id="' + street.id + '">';
             html += '<span class="result-icon">';
@@ -108,15 +136,14 @@ const HargeisaSearch = (function () {
         searchResults.innerHTML = html;
         searchResults.classList.add('active');
 
-        // Add click handlers to results
-        var items = searchResults.querySelectorAll('li[data-id]');
-        items.forEach(function (item) {
+        // Click handlers for street results
+        var streetItems = searchResults.querySelectorAll('li[data-id]');
+        streetItems.forEach(function (item) {
             item.addEventListener('click', function () {
                 var streetId = parseInt(this.dataset.id);
                 var map = HargeisaMap.getMap();
                 HargeisaStreets.highlight(streetId, map);
 
-                // Update search input
                 var street = HargeisaStreets.getStreets().find(function (s) {
                     return s.id === streetId;
                 });
@@ -124,6 +151,21 @@ const HargeisaSearch = (function () {
                     searchInput.value = street.name;
                 }
 
+                searchResults.classList.remove('active');
+            });
+        });
+
+        // Click handlers for place results
+        var placeItems = searchResults.querySelectorAll('li[data-place-id]');
+        placeItems.forEach(function (item) {
+            item.addEventListener('click', function () {
+                var lat = parseFloat(this.dataset.lat);
+                var lng = parseFloat(this.dataset.lng);
+                var map = HargeisaMap.getMap();
+
+                map.flyTo([lat, lng], 17, { duration: 1 });
+
+                searchInput.value = this.querySelector('span:nth-child(2)').textContent;
                 searchResults.classList.remove('active');
             });
         });

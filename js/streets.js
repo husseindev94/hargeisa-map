@@ -1,10 +1,13 @@
 // Street data fetching and rendering via Overpass API
 const HargeisaStreets = (function () {
     // Hargeisa bounding box (south, west, north, east)
-    const BBOX = '9.50,43.99,9.62,44.13';
+    const BBOX = '9.52,44.02,9.60,44.11';
 
-    // Overpass API endpoint
-    const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+    // Multiple Overpass endpoints for fallback
+    const OVERPASS_SERVERS = [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter'
+    ];
 
     // Street data store
     let streets = [];
@@ -12,12 +15,11 @@ const HargeisaStreets = (function () {
 
     // Tiered label layers: each tier appears at a different zoom level
     var labelTiers = {
-        primary: null,    // motorway, trunk, primary — show at zoom 14+
-        secondary: null,  // secondary, tertiary — show at zoom 15+
-        minor: null       // residential, living_street, unclassified, etc. — show at zoom 16+
+        primary: null,
+        secondary: null,
+        minor: null
     };
 
-    // Which road types go in which tier
     function getLabelTier(type) {
         if (type === 'motorway' || type === 'trunk' || type === 'primary') return 'primary';
         if (type === 'secondary' || type === 'tertiary') return 'secondary';
@@ -34,109 +36,102 @@ const HargeisaStreets = (function () {
         residential:  { color: '#9ca8b8', weight: 2, label: 'street-label' },
         living_street:{ color: '#9ca8b8', weight: 2, label: 'street-label' },
         unclassified: { color: '#b0a8c0', weight: 2, label: 'street-label' },
-        service:      { color: '#c0c4c8', weight: 1, label: 'street-label' },
-        track:        { color: '#c0c4c8', weight: 1, label: 'street-label' },
-        path:         { color: '#d0d4d8', weight: 1, label: 'street-label' },
         default:      { color: '#b0a8c0', weight: 2, label: 'street-label' }
     };
 
-    // Build Overpass query for all named roads in Hargeisa
+    // Build optimized Overpass query
+    // - Single query (no duplicate named+all)
+    // - out geom (geometry inline, avoids slow node resolution)
+    // - Only useful road types (skip service/track/path)
     function buildQuery() {
-        return '[out:json][timeout:60];(' +
-            'way["highway"]["name"](' + BBOX + ');' +
-            'way["highway"](' + BBOX + ');' +
-            ');out body;>;out skel qt;';
+        return '[out:json][timeout:30][bbox:' + BBOX + '];' +
+            'way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified)$"];' +
+            'out geom qt;';
     }
 
-    // Fetch street data from Overpass API
+    // Fetch from multiple servers with fallback
     function fetchStreets() {
-        const query = buildQuery();
-        const url = OVERPASS_URL + '?data=' + encodeURIComponent(query);
+        var query = buildQuery();
 
-        return fetch(url)
-            .then(function (response) {
-                if (!response.ok) throw new Error('Overpass API error: ' + response.status);
+        function tryServer(index) {
+            if (index >= OVERPASS_SERVERS.length) {
+                return Promise.reject(new Error('All Overpass servers failed'));
+            }
+            var url = OVERPASS_SERVERS[index] + '?data=' + encodeURIComponent(query);
+            return fetch(url).then(function (response) {
+                if (!response.ok) throw new Error('HTTP ' + response.status);
                 return response.json();
+            }).catch(function () {
+                return tryServer(index + 1);
             });
+        }
+
+        return tryServer(0);
     }
 
-    // Parse Overpass response into usable street data
+    // Parse response - optimized for out geom (geometry is inline)
     function parseResponse(data) {
-        const nodes = {};
-        const ways = [];
+        var ways = [];
 
         data.elements.forEach(function (el) {
-            if (el.type === 'node') {
-                nodes[el.id] = [el.lat, el.lon];
+            if (el.type !== 'way' || !el.tags || !el.tags.highway || !el.geometry) return;
+
+            var coords = [];
+            for (var i = 0; i < el.geometry.length; i++) {
+                var pt = el.geometry[i];
+                if (pt) coords.push([pt.lat, pt.lon]);
             }
-        });
 
-        data.elements.forEach(function (el) {
-            if (el.type === 'way' && el.tags && el.tags.highway) {
-                const coords = [];
-                el.nodes.forEach(function (nodeId) {
-                    if (nodes[nodeId]) {
-                        coords.push(nodes[nodeId]);
-                    }
+            if (coords.length >= 2) {
+                ways.push({
+                    id: el.id,
+                    name: el.tags.name || el.tags['name:en'] || el.tags['name:so'] || null,
+                    nameAlt: el.tags['name:so'] || el.tags['name:en'] || null,
+                    type: el.tags.highway,
+                    coords: coords,
+                    tags: el.tags
                 });
-
-                if (coords.length >= 2) {
-                    ways.push({
-                        id: el.id,
-                        name: el.tags.name || el.tags['name:en'] || el.tags['name:so'] || null,
-                        nameAlt: el.tags['name:so'] || el.tags['name:en'] || null,
-                        type: el.tags.highway,
-                        coords: coords,
-                        tags: el.tags
-                    });
-                }
             }
         });
 
         return ways;
     }
 
-    // Get style for a road type
     function getStyle(type) {
         return ROAD_STYLES[type] || ROAD_STYLES.default;
     }
 
-    // Calculate midpoint of a coordinate array
     function getMidpoint(coords) {
-        var mid = Math.floor(coords.length / 2);
-        return coords[mid];
+        return coords[Math.floor(coords.length / 2)];
     }
 
-    // Calculate bounds of a coordinate array
     function getBounds(coords) {
         return L.latLngBounds(coords);
     }
 
-    // Render streets on the map
+    // Render streets using Canvas renderer for speed
     function renderStreets(map, wayData) {
         streets = wayData;
 
-        // Create tiered label layer groups
+        var renderer = L.canvas({ padding: 0.5 });
+
         labelTiers.primary = L.layerGroup().addTo(map);
         labelTiers.secondary = L.layerGroup();
         labelTiers.minor = L.layerGroup();
 
-        // Track names already labelled per tier to avoid duplicates
         var labelledNames = { primary: {}, secondary: {}, minor: {} };
-
         var namedCount = 0;
 
         wayData.forEach(function (way) {
             var style = getStyle(way.type);
 
-            // Draw the street polyline
             var polyline = L.polyline(way.coords, {
                 color: style.color,
                 weight: style.weight,
-                opacity: 0.7
+                opacity: 0.7,
+                renderer: renderer
             }).addTo(map);
 
-            // Add popup with street info
             var popupContent = '<div class="street-popup">';
             popupContent += '<div class="street-name">' + (way.name || 'Unnamed Road') + '</div>';
             popupContent += '<div class="street-type">' + way.type.replace(/_/g, ' ') + '</div>';
@@ -146,10 +141,8 @@ const HargeisaStreets = (function () {
             popupContent += '</div>';
             polyline.bindPopup(popupContent);
 
-            // Store for search
             streetLayers[way.id] = { polyline: polyline, data: way };
 
-            // Add street name label at midpoint (one label per unique name per tier)
             if (way.name) {
                 namedCount++;
                 var tier = getLabelTier(way.type);
@@ -157,12 +150,9 @@ const HargeisaStreets = (function () {
                 if (!labelledNames[tier][way.name]) {
                     labelledNames[tier][way.name] = true;
 
-                    var midpoint = getMidpoint(way.coords);
-                    var labelClass = style.label;
-
-                    var label = L.marker(midpoint, {
+                    var label = L.marker(getMidpoint(way.coords), {
                         icon: L.divIcon({
-                            className: labelClass,
+                            className: style.label,
                             html: way.name,
                             iconSize: null
                         }),
@@ -174,29 +164,24 @@ const HargeisaStreets = (function () {
             }
         });
 
-        // Update street count
         document.getElementById('street-count').textContent =
             namedCount + ' named streets / ' + wayData.length + ' total roads';
 
-        // Manage label visibility based on zoom — show tiers progressively
         function updateLabels() {
             var zoom = map.getZoom();
 
-            // Primary labels: zoom 14+
             if (zoom >= 14) {
                 if (!map.hasLayer(labelTiers.primary)) map.addLayer(labelTiers.primary);
             } else {
                 if (map.hasLayer(labelTiers.primary)) map.removeLayer(labelTiers.primary);
             }
 
-            // Secondary labels: zoom 15+
             if (zoom >= 15) {
                 if (!map.hasLayer(labelTiers.secondary)) map.addLayer(labelTiers.secondary);
             } else {
                 if (map.hasLayer(labelTiers.secondary)) map.removeLayer(labelTiers.secondary);
             }
 
-            // Minor labels: zoom 16+
             if (zoom >= 16) {
                 if (!map.hasLayer(labelTiers.minor)) map.addLayer(labelTiers.minor);
             } else {
@@ -208,45 +193,53 @@ const HargeisaStreets = (function () {
         updateLabels();
     }
 
-    // Main load function
+    // Main load function with retry
     function load(map) {
         var overlay = document.getElementById('loading-overlay');
+        var msgEl = overlay.querySelector('.loading-content p');
+        var spinnerEl = overlay.querySelector('.loading-spinner');
+        var retries = 0;
+        var maxRetries = 3;
 
-        fetchStreets()
-            .then(function (data) {
-                var wayData = parseResponse(data);
-                renderStreets(map, wayData);
+        function attempt() {
+            fetchStreets()
+                .then(function (data) {
+                    var wayData = parseResponse(data);
+                    renderStreets(map, wayData);
 
-                // Hide loading overlay
-                overlay.classList.add('hidden');
-                setTimeout(function () {
-                    overlay.style.display = 'none';
-                }, 500);
-            })
-            .catch(function (err) {
-                console.error('Failed to load street data:', err);
-                overlay.querySelector('p').textContent =
-                    'Failed to load street data. Please refresh the page.';
-                overlay.querySelector('.loading-spinner').style.display = 'none';
-            });
+                    overlay.classList.add('hidden');
+                    setTimeout(function () {
+                        overlay.style.display = 'none';
+                    }, 500);
+                })
+                .catch(function (err) {
+                    console.error('Failed to load street data:', err);
+                    retries++;
+                    if (retries <= maxRetries) {
+                        msgEl.textContent = 'Retrying... (' + retries + '/' + maxRetries + ')';
+                        setTimeout(attempt, 2000 * retries);
+                    } else {
+                        msgEl.textContent = 'Failed to load street data. Please refresh the page.';
+                        spinnerEl.style.display = 'none';
+                    }
+                });
+        }
+
+        attempt();
     }
 
-    // Get all streets for search
     function getStreets() {
         return streets;
     }
 
-    // Get layer for a street by ID
     function getLayer(id) {
         return streetLayers[id];
     }
 
-    // Highlight a street
     function highlight(id, map) {
         var entry = streetLayers[id];
         if (!entry) return;
 
-        // Reset any previous highlight
         Object.values(streetLayers).forEach(function (s) {
             var origStyle = getStyle(s.data.type);
             s.polyline.setStyle({
@@ -256,7 +249,6 @@ const HargeisaStreets = (function () {
             });
         });
 
-        // Highlight selected street
         entry.polyline.setStyle({
             color: '#ff0000',
             weight: 6,
@@ -264,13 +256,11 @@ const HargeisaStreets = (function () {
         });
         entry.polyline.bringToFront();
 
-        // Zoom to street
         map.fitBounds(getBounds(entry.data.coords), {
             padding: [50, 50],
             maxZoom: 17
         });
 
-        // Open popup
         entry.polyline.openPopup();
     }
 
